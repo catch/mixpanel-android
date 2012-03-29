@@ -7,6 +7,8 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Timer;
 import java.util.TimerTask;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -67,6 +69,9 @@ public class MPMetrics {
     private ThreadPoolExecutor executor =
     		new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>());
 
+    // Executor to handle track calls
+    private static ExecutorService executorTrack = Executors.newSingleThreadExecutor();
+
     private MPMetrics(Context context, String token) {
     	mContext = context;
         mToken = token;
@@ -117,6 +122,55 @@ public class MPMetrics {
         mSuperProperties = new JSONObject();
     }
 
+        class Handler implements Runnable {
+        private String eventName;
+        private JSONObject properties;
+        private String time;
+
+        Handler(String eventName, JSONObject properties) {
+              this.eventName = eventName;
+              this.properties = properties;
+              this.time = Long.toString(System.currentTimeMillis() / 1000);
+          }
+          public void run() {
+              JSONObject dataObj = new JSONObject();
+              try {
+                  dataObj.put("event", eventName);
+                  JSONObject propertiesObj = new JSONObject();
+                  propertiesObj.put("token", mToken);
+                  propertiesObj.put("time", time);
+                  propertiesObj.put("distinct_id", mDeviceId == null ? "UNKNOWN" : mDeviceId);
+                  propertiesObj.put("carrier", mCarrier == null ? "UNKNOWN" : mCarrier);
+                  propertiesObj.put("model",  mModel == null ? "UNKNOWN" : mModel);
+                  propertiesObj.put("version", mVersion == null ? "UNKNOWN" : mVersion);
+                  propertiesObj.put("mp_lib", "android");
+
+                  for (Iterator<String> iter = mSuperProperties.keys(); iter.hasNext(); ) {
+                      String key = iter.next();
+                      propertiesObj.put(key, mSuperProperties.get(key));
+                  }
+
+                  if (properties != null) {
+                      for (Iterator<String> iter = properties.keys(); iter.hasNext();) {
+                          String key = iter.next();
+                          propertiesObj.put(key, properties.get(key));
+                      }
+                  }
+
+                  dataObj.put("properties", propertiesObj);
+              } catch (JSONException e) {
+                  Log.e(LOGTAG, "event", e);
+                  return;
+              }
+
+              int count = mDbAdapter.addEvent(dataObj);
+
+              if (mTestMode || (count >= BULK_UPLOAD_LIMIT && executor.getQueue().isEmpty())) {
+                  flush();
+              }
+          }
+    }
+
     /**
      * Track an event.
      *
@@ -125,43 +179,7 @@ public class MPMetrics {
      * Pass null if no extra properties exist.
      */
     public void track(String eventName, JSONObject properties) {
-        String time = Long.toString(System.currentTimeMillis() / 1000);
-
-        JSONObject dataObj = new JSONObject();
-        try {
-            dataObj.put("event", eventName);
-            JSONObject propertiesObj = new JSONObject();
-            propertiesObj.put("token", mToken);
-            propertiesObj.put("time", time);
-            propertiesObj.put("distinct_id", mDeviceId == null ? "UNKNOWN" : mDeviceId);
-            propertiesObj.put("carrier", mCarrier == null ? "UNKNOWN" : mCarrier);
-            propertiesObj.put("model",  mModel == null ? "UNKNOWN" : mModel);
-            propertiesObj.put("version", mVersion == null ? "UNKNOWN" : mVersion);
-            propertiesObj.put("mp_lib", "android");
-
-            for (Iterator<String> iter = mSuperProperties.keys(); iter.hasNext(); ) {
-        		String key = iter.next();
-    			propertiesObj.put(key, mSuperProperties.get(key));
-        	}
-
-            if (properties != null) {
-            	for (Iterator<String> iter = properties.keys(); iter.hasNext();) {
-            		String key = iter.next();
-        			propertiesObj.put(key, properties.get(key));
-            	}
-            }
-
-            dataObj.put("properties", propertiesObj);
-        } catch (JSONException e) {
-        	Log.e(LOGTAG, "event", e);
-            return;
-        }
-
-        int count = mDbAdapter.addEvent(dataObj);
-
-        if (mTestMode || (count >= BULK_UPLOAD_LIMIT && executor.getQueue().isEmpty())) {
-            flush();
-        }
+        executorTrack.submit(new Handler(eventName, properties));
     }
 
     public void flush() {
